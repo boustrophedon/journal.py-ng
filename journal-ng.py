@@ -5,7 +5,7 @@ from pathlib import Path
 
 from contextlib import contextmanager
 import datetime
-from datetime import date
+from datetime import date, timezone
 import getpass
 import shlex
 import sqlite3
@@ -32,7 +32,7 @@ EPILOG = """
 """
 
 def spawn_editor(filepath):
-    print(f"Opening file {filepath}")
+    print(f"Opening temporary entry file {filepath}")
     try:
         command = shlex.split(EDITORCMD.format(filepath=filepath))
         subprocess.run(command, check=True)
@@ -53,12 +53,18 @@ def write_encrypted_file(password: str, input_file: str, output_file: str):
                     check=True)
 
 def read_encrypted_file(password: str, input_file: str, output_file: str):
-    subprocess.run(["gpg", "--batch", "--passphrase-fd", "0", "--yes", "--quiet", "--output", output_file,
+    subprocess.run(["gpg", "--batch", "--yes", "--quiet",
+                    "--passphrase-fd", "0", "--pinentry-mode", "loopback",
+                    "--output", output_file,
                     "--decrypt", input_file],
                     input=password,
                     text=True,
                     check=True)
 
+def shred(path: str):
+    if not (Path(path).name.startswith("entry.") or Path(path).name.startswith("db.")):
+        raise SystemExit(f"Tried to shred a non-temporary file {path}. This is a programming error. Exiting.")
+    subprocess.run(["shred", "--force", path], check=True)
 
 @contextmanager
 def encrypted_database(password: str, input_path: str, output_path: str, readonly: bool = False) -> Iterator[Connection]:
@@ -76,6 +82,7 @@ def encrypted_database(password: str, input_path: str, output_path: str, readonl
             write_encrypted_file(password, temp_db_path, output_path)
     finally:
         conn.close()
+        shred(temp_db_path)
         temp_db.close()
 
 @contextmanager
@@ -99,6 +106,7 @@ def make_temp_entry_path(existing_entry: str | None, readonly: bool = False) -> 
 
     try:
         yield temp_entry_path
+        shred(temp_entry_path)
         os.unlink(temp_entry_path)
     # os.unlink inside try and no finally because we want the entry to remain
     # if something fails during database/encryption operations
@@ -151,7 +159,7 @@ def get_existing_entry(conn: Connection, entry_date: date | None) -> str | None:
 
     return entry_date, existing_entry
 
-def upsert_journal_entry(conn: Connection, created: date, modified: datetime.datetime, content: str):
+def upsert_journal_entry(conn: Connection, created: str, modified: str, content: str):
     conn.execute("INSERT INTO entries values (?, ?, ?) \
             ON CONFLICT(created) DO UPDATE \
             SET modified=EXCLUDED.modified, \
@@ -173,7 +181,7 @@ def init_journal(ns: Namespace):
 
         conn = sqlite3.connect(temp_db_path)
 
-        # created: date iso, modified: datetime iso, content: text
+        # created: date iso, modified: datetime iso w/tz, content: text
         #
         # Note that we don't need to manually create an index as we only select
         # by created, which has an internal index due to the unique constraint
@@ -221,9 +229,52 @@ def edit_entry(ns: Namespace, readonly: bool = False):
         if not readonly:
             with encrypted_database(password, input_path, output_path) as conn:
                 created = entry_date.isoformat()
-                modified = datetime.datetime.today().isoformat(timespec="seconds")
+                modified = datetime.datetime.now(timezone.utc).isoformat(timespec="seconds")
                 upsert_journal_entry(conn, created, modified, content)
                 conn.commit()
+
+def migrate(ns: Namespace):
+    output_path = ns.output if ns.output else "./encrypted-journal"
+    input_path = ns.input if ns.input else "./encrypted-journal"
+    input_dir = ns.dir
+
+    check_input_path(input_path)
+
+    files = [f for f in Path(input_dir).iterdir() if f.name.endswith("jrn")]
+
+    password_old = getpass.getpass("Old journal file password: ")
+    password_new = getpass.getpass("New journal db password: ")
+
+    with encrypted_database(password_new, input_path, output_path) as conn:
+        for file in files:
+            content = None
+            with make_temp_entry_path(None) as temp_jrn_path:
+                read_encrypted_file(password_old, str(file), temp_jrn_path)
+                with open(temp_jrn_path) as jrn_file:
+                    content = jrn_file.read()
+
+            created = file.name.split(".")[0][:10]
+
+            mtime = file.stat().st_mtime
+            mtime_dt = datetime.datetime.fromtimestamp(mtime, datetime.timezone.utc)
+            modified = mtime_dt.isoformat(timespec = "seconds")
+            upsert_journal_entry(conn, created, modified, content)
+            conn.commit()
+            print(f"migrated {file}")
+    print("done migration")
+
+
+def sql_shell(ns: Namespace):
+    input_path = ns.input if ns.input else "./encrypted-journal"
+    output_path = ns.output if ns.output else "./encrypted-journal"
+
+    check_input_path(input_path)
+    temp_db = tempfile.NamedTemporaryFile(prefix="db.", dir=".")
+    temp_db_path = temp_db.name
+
+    password = getpass.getpass()
+    read_encrypted_file(password, input_path, temp_db_path)
+    subprocess.run(["sqlite3", temp_db_path])
 
 
 def main():
@@ -262,8 +313,16 @@ def main():
     view_parser.add_argument("entry", default=None, nargs="?",
         help="Journal date. The format is YYYY-MM-DD. Default is latest.")
 
+    # Migrate
+    migrate_parser = subparsers.add_parser("migrate", help="View a journal entry.")
+    migrate_parser.set_defaults(cmd = migrate)
+
+    migrate_parser.add_argument("dir", default=".", nargs="?",
+        help="directory to migrate from")
+
     # Shell
-    # TODO: drop you into an sqlite shell with the database open?
+    shell_parser = subparsers.add_parser("sql-shell", help="Debug: sql shell")
+    shell_parser.set_defaults(cmd = sql_shell)
 
     # Test
     # test_parser = subparsers.add_parser("self-test", help="Debug: Run tests.")
