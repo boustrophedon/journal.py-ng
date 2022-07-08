@@ -174,6 +174,9 @@ def init_journal(ns: Namespace):
         conn = sqlite3.connect(temp_db_path)
 
         # created: date iso, modified: datetime iso, content: text
+        #
+        # Note that we don't need to manually create an index as we only select
+        # by created, which has an internal index due to the unique constraint
         conn.execute("CREATE TABLE entries (created TEXT UNIQUE, modified TEXT, content TEXT);")
         conn.commit()
         conn.close()
