@@ -1,3 +1,5 @@
+#!/bin/env python
+
 import argparse
 from argparse import Namespace
 
@@ -21,6 +23,14 @@ from typing import Iterator
 
 # Config
 EDITORCMD = "vim {filepath}"
+# NOTE: SSDs do wear-leveling in such a way that overwriting a file doesn't
+# actually "delete" the data stored, so writing and then shredding the temp
+# entries and temp database will not make the data fully unrecoverable.
+#
+# To mitigate this issue, make sure that your OS's default temporary directory
+# or the one set below is a tempfs-like in-memory filesystem, or use a
+# filesystem that is also encrypted or on a non-SSD drive.
+TEMPDIR = None
 
 
 HELPTEXT = """
@@ -68,7 +78,7 @@ def shred(path: str):
 
 @contextmanager
 def encrypted_database(password: str, input_path: str, output_path: str, readonly: bool = False) -> Iterator[Connection]:
-    temp_db = tempfile.NamedTemporaryFile(prefix="db.", dir=".")
+    temp_db = tempfile.NamedTemporaryFile(prefix="db.", dir=TEMPDIR)
     temp_db_path = temp_db.name
 
     read_encrypted_file(password, input_path, temp_db_path)
@@ -92,7 +102,7 @@ def make_temp_entry_path(existing_entry: str | None, readonly: bool = False) -> 
     # 1. if something goes wrong you don't lose the entry.
     # 2. We can write the existing entry data to it, close it, and reopen with our editor
 
-    temp_entry = tempfile.NamedTemporaryFile(mode='w+', prefix="entry.", dir=".", delete=False)
+    temp_entry = tempfile.NamedTemporaryFile(mode='w+', prefix="entry.", dir=TEMPDIR, delete=False)
     temp_entry_path = temp_entry.name
 
     # If there's an existing entry, write that to the temporary file for editing
@@ -176,7 +186,7 @@ def init_journal(ns: Namespace):
     if Path(output_file).exists():
         raise SystemExit(f"Output file {output_file} already exists.")
 
-    with tempfile.NamedTemporaryFile(dir=".") as temp_db:
+    with tempfile.NamedTemporaryFile(dir=TEMPDIR) as temp_db:
         temp_db_path = temp_db.name
 
         conn = sqlite3.connect(temp_db_path)
@@ -269,7 +279,7 @@ def sql_shell(ns: Namespace):
     output_path = ns.output if ns.output else "./encrypted-journal"
 
     check_input_path(input_path)
-    temp_db = tempfile.NamedTemporaryFile(prefix="db.", dir=".")
+    temp_db = tempfile.NamedTemporaryFile(prefix="db.", dir=TEMPDIR)
     temp_db_path = temp_db.name
 
     password = getpass.getpass()
