@@ -21,8 +21,12 @@ import sys
 from typing import Iterator
 
 
-# Config
+## Config
+# The command for editing journal entries
 EDITORCMD = "vim {filepath}"
+# Pause, leaving the entry tempfile in plaintext after the editor closes, until the user presses enter
+PAUSE_AFTER_EDITING = False
+
 # NOTE: SSDs do wear-leveling in such a way that overwriting a file doesn't
 # actually "delete" the data stored, so writing and then shredding the temp
 # entries and temp database will not make the data fully unrecoverable.
@@ -53,7 +57,8 @@ def spawn_editor(filepath):
             raise err
 
     # this lets you do whatever you want with the temp file before it's encrypted/deleted
-    input("Press Enter when done.")
+    if PAUSE_AFTER_EDITING:
+        input("Press Enter when done.")
 
 def write_encrypted_file(password: str, input_file: str, output_file: str):
     subprocess.run(["gpg", "--batch", "--passphrase-fd", "0", "--yes", "--quiet", "--output", output_file,
